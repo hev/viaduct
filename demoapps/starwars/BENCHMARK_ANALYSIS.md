@@ -110,6 +110,35 @@ The cache doesn't just improve latency — it **eliminates the resolver object g
 
 3. **Fan-out query deduplication**: 500 characters with 4 distinct homeworld IDs means the homeworld resolver runs 4 unique lookups, not 500. A cache-aware layer can deduplicate at the entity level, not just the query level.
 
+## Why NVMe Cache — Not Memory Cache — Fits This Problem
+
+### The key space is large because the expensive queries are nested
+
+The queries that need caching are the nested ones (22-184ms). But nested queries have the largest key space: every unique combination of entity IDs in the resolver chain produces a different response. A listing detail page query that resolves host + reviews + photos + amenities has a key space proportional to the number of active listings — at Airbnb scale, tens of millions of unique cache entries.
+
+Memory-only caches (Redis, in-process LRU) can't hold this. A 50 KB average response × 40M entries = ~2 TB. That's the key space that actually hurts, and it doesn't fit in RAM.
+
+An NVMe-backed cache holds billions of keys on a single node at sub-millisecond read latency. The entire hot working set fits on one drive. **The queries that need caching the most are the ones with key spaces too large for memory-only caches.**
+
+### NVMe cache is persistent — warming is cumulative
+
+Unlike memory caches, NVMe-backed storage survives process restarts, deploys, and node reboots. Cache entries don't vanish on a rolling deploy. This changes the warming model fundamentally:
+
+- **No TTL-based expiration needed.** For datasets that are mostly stable (listings, user profiles, catalog data), cached responses remain valid until the underlying data changes. A listing that hasn't been edited in 6 months still has a warm cache entry from 6 months ago.
+- **Warming is monotonic.** Every cache miss that pulls through from upstream adds an entry that persists indefinitely. The cache only gets warmer over time.
+- **Deploy ≠ cold start.** Memory caches lose everything on restart. NVMe caches retain the full working set across deploys, scaling events, and maintenance windows.
+
+### Warming strategy for stable datasets
+
+Most entity data in a system like this is read-heavy and write-infrequent. Listings, species, planets, character profiles — they change rarely relative to how often they're read. For this class of data:
+
+1. **Pull-through on first miss.** Every query miss proxies to Viaduct, caches the response on the return path. Within hours of deployment, the popular query × entity combinations are warm.
+2. **Query history replay on cold start.** Log query hashes + variables as they flow through the gateway. On a true cold start (first deploy, new region), replay recent query history against Viaduct to pre-populate. 100 parallel workers × 45 ops/s = 4,500 queries/second — 40M entries warm in ~2.5 hours.
+3. **Tiered warming.** Don't replay everything. The top 30 query shapes × top 100K entities covers ~80% of expected traffic. Warm that first (~11 minutes), open to live traffic with pull-through for the rest.
+4. **Mutation-aware invalidation.** When data does change, the gateway sees the mutation, identifies affected cache entries via a type→query index, and purges only those entries. The next read re-warms that specific entry. No bulk expiration, no cache stampede.
+
+The net effect: for a dataset where 95%+ of entities change less than once per day, the cache converges to near-100% hit rate within 24-48 hours and stays there — because nothing expires it.
+
 ## Reproducing
 
 ```bash
