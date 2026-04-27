@@ -126,13 +126,3 @@ docker compose -f docker-compose.benchmark.yml up bench-512m
 docker compose -f docker-compose.benchmark.yml up bench-256m
 docker compose -f docker-compose.benchmark.yml up bench-128m
 ```
-
-## Files Changed
-
-| File | What |
-|------|------|
-| `demoapps/starwars/src/test/.../ReadWriteBenchmarkTest.kt` | Benchmark harness: memory reporting, 50K entity injection, nesting depth ladder |
-| `demoapps/starwars/build.gradle.kts` | JVM heap constraint (`-Xmx128m`) for test task |
-| `demoapps/starwars/Dockerfile` | Multi-stage build for containerized benchmark runs |
-| `demoapps/starwars/docker-compose.benchmark.yml` | Three memory-constrained profiles (512/256/128 MB) |
-| `demoapps/starwars/BENCHMARK_ANALYSIS.md` | This document |
