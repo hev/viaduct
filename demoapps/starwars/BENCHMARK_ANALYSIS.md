@@ -139,6 +139,17 @@ Most entity data in a system like this is read-heavy and write-infrequent. Listi
 
 The net effect: for a dataset where 95%+ of entities change less than once per day, the cache converges to near-100% hit rate within 24-48 hours and stays there — because nothing expires it.
 
+### Zero-downtime cutover
+
+Because the cache layer sits in front of Viaduct as a transparent proxy, adoption doesn't require a flag day:
+
+1. **Shadow mode.** Deploy the cache layer alongside Viaduct, mirror live traffic through it without serving responses. Every request warms the cache. Viaduct continues serving directly.
+2. **Monitor hit rate.** When the cache reports 90%+ hit rate (typically hours for popular queries, 1-2 days for the long tail), it's ready.
+3. **Gradual traffic shift.** Balance a percentage of reads through the cache layer — 1%, 10%, 50% — while monitoring latency and correctness. Viaduct remains the fallback at every step.
+4. **Full cutover.** Route all reads through the cache. Viaduct handles only cache misses and mutations.
+
+No cold-start penalty for users. No downtime. The cache is proven warm before it serves a single production request. And because the NVMe storage is persistent, subsequent deploys of the cache layer itself don't lose the warm state — the working set survives restarts.
+
 ## Reproducing
 
 ```bash
