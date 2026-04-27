@@ -2,8 +2,11 @@ package com.example.starwars.service.test
 
 import com.example.starwars.modules.filmography.characters.models.Character
 import com.example.starwars.modules.filmography.characters.models.CharacterRepository
+import com.fasterxml.jackson.databind.JsonNode
 import io.micronaut.http.client.HttpClient
 import io.micronaut.http.client.annotation.Client
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ThreadLocalRandom
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest
 import jakarta.inject.Inject
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +46,7 @@ class ReadWriteBenchmarkTest {
 
         private val results = mutableListOf<BenchmarkResult>()
         private val scaledResults = mutableListOf<BenchmarkResult>()
+        private val cachedResults = mutableListOf<Pair<BenchmarkResult, BenchmarkResult>>() // uncached, cached
         private val memorySnapshots = mutableListOf<String>()
 
         data class BenchmarkResult(
@@ -109,6 +113,33 @@ class ReadWriteBenchmarkTest {
                         "%-40s %7.2fms %7.2fms %7.2fms %7.2fms %7.2fms %7.2fms %9.1f",
                         result.name, result.min, result.max, result.mean,
                         result.p50, result.p95, result.p99, result.opsPerSecond
+                    )
+                )
+            }
+            println(separator)
+        }
+
+        fun printCachedComparison() {
+            if (cachedResults.isEmpty()) return
+            val header = String.format(
+                "%-34s %10s %10s %10s %10s %10s",
+                "Query", "Uncached", "Cached", "Speedup", "P99 Unc.", "P99 Cache"
+            )
+            val separator = "-".repeat(header.length)
+            println("\n$separator")
+            println("CACHE SIMULATION: UNCACHED vs CACHED (50K dataset, 128MB heap)")
+            println(separator)
+            println(header)
+            println(separator)
+            for ((uncached, cached) in cachedResults) {
+                val speedup = uncached.mean / cached.mean
+                val cachedUs = cached.mean * 1000.0
+                val cachedP99Us = cached.p99 * 1000.0
+                println(
+                    String.format(
+                        "%-34s %9.2fms %8.0f\u00B5s %9.0fx %9.2fms %8.0f\u00B5s",
+                        uncached.name, uncached.mean, cachedUs, speedup,
+                        uncached.p99, cachedP99Us
                     )
                 )
             }
@@ -468,6 +499,94 @@ class ReadWriteBenchmarkTest {
         bulkDeleteCharacters(syntheticIds)
     }
 
+    // --- Cache Simulation Benchmarks ---
+
+    @Test
+    @Order(30)
+    fun `cached - simulated query cache vs uncached at 50K`() {
+        val tier = 50_000
+        val syntheticIds = bulkInsertCharacters(tier)
+
+        // Simulated cache: query string → serialized response
+        val cache = ConcurrentHashMap<String, JsonNode>()
+
+        // Each query is benchmarked uncached (first), then cached (second)
+        val queries = listOf(
+            "flat(100)" to
+                """{ allCharacters(limit: 100) { name } }""",
+            "all scalars(100)" to
+                """{ allCharacters(limit: 100) { name birthYear eyeColor gender hairColor height mass created edited } }""",
+            "depth1: hw+species" to
+                """{ allCharacters(limit: 100) { name homeworld { name } species { name } } }""",
+            "depth2: sp.homeworld" to
+                """{ allCharacters(limit: 100) { name species { name homeworld { name } } } }""",
+            "depth3: hw.res.species" to
+                """{ allCharacters(limit: 100) { name homeworld { name residents(limit: 5) { name species { name } } } } }""",
+            "fanout: 500 × depth1" to
+                """{ allCharacters(limit: 500) { name homeworld { name } species { name } } }""",
+            "kitchen sink" to
+                """{ allCharacters(limit: 50) { name birthYear displayName displaySummary appearanceDescription filmCount richSummary homeworld { name diameter population } species { name classification homeworld { name } } } }""",
+        )
+
+        for ((name, query) in queries) {
+            // --- Uncached: every request hits Viaduct ---
+            cache.clear()
+            val uncachedMeasurements = mutableListOf<Double>()
+            // Warmup (uncached)
+            repeat(WARMUP_ITERATIONS) {
+                client.executeGraphQLQuery(query)
+            }
+            repeat(MEASUREMENT_ITERATIONS) {
+                val start = System.nanoTime()
+                val response = client.executeGraphQLQuery(query)
+                val elapsed = (System.nanoTime() - start) / 1_000_000.0
+                uncachedMeasurements.add(elapsed)
+                assert(response.path("errors").isMissingNode || response.path("errors").isNull)
+            }
+
+            // --- Cached: first request warms, rest simulate NVMe read ---
+            cache.clear()
+            val cachedMeasurements = mutableListOf<Double>()
+            // Warm the cache with one real request
+            val warmResponse = client.executeGraphQLQuery(query)
+            cache[query] = warmResponse
+            // Warmup (cached path with simulated NVMe latency)
+            repeat(WARMUP_ITERATIONS) {
+                simulateNvmeRead()
+                cache[query]!!
+            }
+            repeat(MEASUREMENT_ITERATIONS) {
+                val start = System.nanoTime()
+                simulateNvmeRead()
+                val response = cache[query]!!
+                val elapsed = (System.nanoTime() - start) / 1_000_000.0
+                cachedMeasurements.add(elapsed)
+                assert(response.path("errors").isMissingNode || response.path("errors").isNull)
+            }
+
+            val uncached = BenchmarkResult(name, uncachedMeasurements)
+            val cached = BenchmarkResult(name, cachedMeasurements)
+            cachedResults.add(uncached to cached)
+        }
+
+        bulkDeleteCharacters(syntheticIds)
+    }
+
+    // --- Helpers ---
+
+    /**
+     * Simulate NVMe read latency: ~50-150µs with jitter.
+     * Real-world NVMe random 4K reads land in this range.
+     */
+    private fun simulateNvmeRead() {
+        val baseNanos = 50_000L  // 50µs base
+        val jitterNanos = ThreadLocalRandom.current().nextLong(0, 100_000) // 0-100µs jitter
+        val targetNanos = baseNanos + jitterNanos
+        val deadline = System.nanoTime() + targetNanos
+        @Suppress("ControlFlowWithEmptyBody")
+        while (System.nanoTime() < deadline) { /* spin-wait for sub-ms accuracy */ }
+    }
+
     // --- Helpers for scaled tests ---
 
     private fun bulkInsertCharacters(count: Int): List<String> {
@@ -507,6 +626,7 @@ class ReadWriteBenchmarkTest {
     fun `print benchmark results`() {
         printResults()
         printScaledResults()
+        printCachedComparison()
         printMemoryAndGcReport()
     }
 }
