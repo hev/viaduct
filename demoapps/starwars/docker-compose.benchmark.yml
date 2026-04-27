@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  # 512MB container, 384MB JVM heap — should pass comfortably
+  bench-512m:
+    build:
+      context: ../..
+      dockerfile: demoapps/starwars/Dockerfile
+    mem_limit: 512m
+    memswap_limit: 512m
+    environment:
+      - JAVA_OPTS=-Xmx384m -XX:+PrintGCDetails -Xlog:gc*
+    tmpfs:
+      - /tmp
+
+  # 256MB container, 192MB JVM heap — tight, may see GC pressure
+  bench-256m:
+    build:
+      context: ../..
+      dockerfile: demoapps/starwars/Dockerfile
+    mem_limit: 256m
+    memswap_limit: 256m
+    environment:
+      - JAVA_OPTS=-Xmx192m -XX:+PrintGCDetails -Xlog:gc*
+    tmpfs:
+      - /tmp
+
+  # 128MB container, 96MB JVM heap — likely OOM or GC thrash
+  bench-128m:
+    build:
+      context: ../..
+      dockerfile: demoapps/starwars/Dockerfile
+    mem_limit: 128m
+    memswap_limit: 128m
+    environment:
+      - JAVA_OPTS=-Xmx96m -XX:+PrintGCDetails -Xlog:gc*
+    tmpfs:
+      - /tmp

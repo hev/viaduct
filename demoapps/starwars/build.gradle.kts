@@ -69,6 +69,8 @@ application {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // Constrain heap to force GC pressure during scaled benchmarks
+    jvmArgs("-Xmx128m", "-Xms64m")
 }
 
 tasks.withType<JavaExec> {
