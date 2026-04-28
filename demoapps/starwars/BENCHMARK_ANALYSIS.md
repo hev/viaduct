@@ -1,43 +1,80 @@
-# Viaduct Performance Under Memory Pressure: Benchmark Analysis
+# Star Wars Benchmark Analysis: Cache Hits Flatten the Tail
 
 ## TL;DR
 
-We stress-tested Viaduct's Star Wars demo with 50,000 in-memory entities under a constrained 128MB JVM heap. **Nested GraphQL queries are the dominant cost driver** — each resolver hop multiplies transient object allocation, and under memory pressure the GC can't keep up. A single 500-character query with depth-1 nesting takes **184ms mean / 215ms P99** and the JVM spends **8% of wall time in garbage collection**.
+The Star Wars benchmark has one clear result: **fan-out under memory pressure creates the latency tail, and response-cache hits remove that tail for repeat queries.**
 
-An NVMe-backed query-result cache layer ([hev/mesh](https://github.com/hev/mesh) `layer-gateway`) now sits in front of Viaduct and eliminates this entirely for repeat queries: **sub-millisecond reads from Aerospike cache vs. 20-200ms resolver chains**. Measured: **24x speedup on 500-entity fan-out, ~1ms cache hits regardless of query depth**.
+With 50,000 in-memory entities and a 128MB JVM heap, Viaduct handles shallow reads well, but a 500-character nested read reaches **184ms mean / 215ms P99** and only **5.4 ops/s**. The JVM spends **8.1% of wall time in GC**, including 34 old-gen collections.
 
----
+With the NVMe-backed query-result cache in [hev/mesh](https://github.com/hev/mesh) `layer-gateway`, repeat queries return in about **1ms regardless of GraphQL depth or fan-out**. The measured fan-out case drops from **28.3ms direct to 1.1ms from cache** in the cache benchmark, a **24x speedup**. Compared with the constrained 128MB JVM run, the same shape maps to roughly **170x** faster repeat reads.
 
-## Test Setup
+The practical conclusion is:
 
-- **Dataset**: 50,000 synthetic characters bulk-inserted via `CharacterRepository` (the `@Singleton` in-memory store)
-- **JVM**: OpenJDK 21, G1 GC, **-Xmx128m -Xms64m** (deliberately constrained)
-- **Benchmark**: 5 warmup + 50 measured iterations per query pattern
-- **Hardware**: Apple Silicon (M-series), single JVM process
+- Keep Viaduct healthy on cache misses by bounding expensive fan-out.
+- Send repeat read traffic through a persistent response cache.
+- Treat mutation-aware invalidation as the correctness requirement that makes long-lived cache entries safe.
 
-## Results: Nesting Depth Ladder (50K entities, 128MB heap)
+## Benchmark Context
+
+There are two related benchmark runs:
+
+| Run | Purpose | Environment |
+|-----|---------|-------------|
+| JVM pressure benchmark | Shows where Viaduct's latency tail comes from | Star Wars demo, 50K synthetic characters, JDK 21, G1, `-Xmx128m -Xms64m`, 5 warmup + 50 measured iterations |
+| Cache benchmark | Measures the pull-through response cache | Star Wars demo with 50,005 characters, `layer-gateway` Rust/Axum proxy, Aerospike Enterprise, Docker, 20 measured cache-hit iterations |
+
+The absolute "direct Viaduct" numbers differ between the two runs because the JVM pressure benchmark deliberately constrains heap to expose GC behavior, while the cache benchmark measures proxy/cache overhead in Docker. The shape of the result is consistent: nested fan-out is expensive on the direct path, while cache hits stay near 1ms.
+
+## Lead Result: Cache Hit Latency Is Flat
+
+The cache key is a SHA-256 hash of the GraphQL request body. On a hit, the gateway returns serialized response bytes from Aerospike instead of invoking Viaduct resolvers.
 
 ```
 ---------------------------------------------------------------------------------------------------------
-SCALED DATASET BENCHMARK RESULTS (5 warmup, 50 measured)
+GRAPHQL CACHE HIT BENCHMARK (50K dataset, Aerospike NVMe cache)
 ---------------------------------------------------------------------------------------------------------
-Scaled Benchmark                              Min      Max     Mean      P50      P95      P99      Ops/s
+Query                                        Direct (Viaduct)    Cache Hit    Speedup
 ---------------------------------------------------------------------------------------------------------
-flat: list(100) name                        1.95ms    6.25ms    2.84ms    2.68ms    4.23ms    5.55ms     352.5
-flat: list(100) all scalars                 4.61ms   15.60ms    6.83ms    6.10ms   12.26ms   14.72ms     146.5
-depth1: +homeworld                         11.35ms   20.13ms   13.85ms   13.21ms   18.44ms   19.75ms      72.2
-depth1: +homeworld +species                15.37ms   28.24ms   22.00ms   21.77ms   27.39ms   28.18ms      45.5
-depth2: +species.homeworld                 10.88ms   22.63ms   13.34ms   12.37ms   18.70ms   21.54ms      75.0
-depth2: +homeworld.residents               11.72ms   18.26ms   13.49ms   12.78ms   17.77ms   18.21ms      74.1
-depth3: hw.residents.species               13.11ms   19.89ms   14.76ms   14.07ms   19.34ms   19.79ms      67.8
-depth3: films.chars.hw.res                  6.82ms   16.40ms    8.71ms    8.10ms   12.12ms   15.29ms     114.8
-fanout: 500 × depth1                      154.71ms  216.79ms  183.61ms  187.05ms  210.62ms  215.21ms       5.4
-computed: filmCount+richSummary            15.15ms   25.60ms   18.40ms   17.89ms   23.99ms   25.45ms      54.3
-kitchen sink: all resolvers                22.61ms   35.09ms   25.53ms   24.48ms   31.43ms   33.91ms      39.2
+flat: 100 chars, name                                  6.3ms        932us         6x
+flat: 100 chars, all scalars                           6.7ms        989us         6x
+depth-1: 100 + homeworld                              22.1ms        1.0ms        21x
+depth-1: 100 + homeworld + species                    14.7ms        923us        16x
+depth-2: 100 + species.homeworld                      10.6ms        979us        10x
+depth-2: 100 + homeworld.residents(5)                 12.0ms        1.0ms        11x
+depth-3: 100 + hw.residents.species                   11.2ms        985us        11x
+fanout: 500 + homeworld + species                     28.3ms        1.1ms        24x
+kitchen sink: 50 + all resolvers                       6.4ms        1.0ms         5x
 ---------------------------------------------------------------------------------------------------------
 ```
 
-### GC Impact
+Key observations:
+
+- Cache hits land between **923us and 1.1ms** across flat, nested, and fan-out queries.
+- Query depth stops mattering on the hit path because no resolver tree is built.
+- Cache misses still pay the direct Viaduct cost plus the proxy/Aerospike write path; the table focuses on the steady-state hit path.
+- Cached responses avoid resolver invocation, transient object allocation, batch lookup work, and object-tree-to-JSON serialization.
+
+## Why The Direct Path Tails
+
+Under a 128MB heap, direct Viaduct latency grows with resolver fan-out and allocation pressure:
+
+| Query Shape | Mean | P99 | Ops/s |
+|-------------|------|-----|-------|
+| flat: list(100) name | 2.84ms | 5.55ms | 352.5 |
+| flat: list(100) all scalars | 6.83ms | 14.72ms | 146.5 |
+| depth1: +homeworld | 13.85ms | 19.75ms | 72.2 |
+| depth1: +homeworld +species | 22.00ms | 28.18ms | 45.5 |
+| depth2: +species.homeworld | 13.34ms | 21.54ms | 75.0 |
+| depth2: +homeworld.residents | 13.49ms | 18.21ms | 74.1 |
+| depth3: hw.residents.species | 14.76ms | 19.79ms | 67.8 |
+| depth3: films.chars.hw.res | 8.71ms | 15.29ms | 114.8 |
+| fanout: 500 + depth1 | 183.61ms | 215.21ms | 5.4 |
+| computed: filmCount + richSummary | 18.40ms | 25.45ms | 54.3 |
+| kitchen sink: all resolvers | 25.53ms | 33.91ms | 39.2 |
+
+Fan-out dominates. A 500-item listing query that resolves two related entities per row is enough to push direct execution to **184ms mean** and **5.4 ops/s** on the constrained heap. This is the important miss-path risk.
+
+GC explains the tail:
 
 ```
 ----------------------------------------------------------------------
@@ -58,142 +95,51 @@ MEMORY & GC REPORT
 ----------------------------------------------------------------------
 ```
 
-**2.6 seconds of GC time** across 32 seconds of execution — **8.1% GC overhead**. 34 old-gen collections at 30ms each are what produce the tail latency spikes.
+Across 32 seconds of benchmark execution, GC consumed **2.6 seconds**. The stored data is not the main problem: 50K characters add only **14.7 MB**, or about **290 bytes per entity**. The tail comes from transient per-request allocation: resolver objects, intermediate collections, lookup results, and serialization buffers.
 
-## Key Findings
+Even the flat `name` query shows the effect: **2.68ms P50 to 5.55ms P99**, despite doing almost no resolver work.
 
-### 1. Each resolver depth roughly doubles latency
+## What The Cache Changes
 
-| Depth | Example Query | Mean | Resolver Objects / Request |
-|-------|---------------|------|--------------------------|
-| 0 (flat) | `name` | 2.8ms | ~100 |
-| 0 (all scalars) | `name birthYear eyeColor ...` | 6.8ms | ~100 (more serialization) |
-| 1 | `+homeworld` | 13.9ms | ~200 |
-| 1 | `+homeworld +species` | 22.0ms | ~300 |
-| 2 | `+species.homeworld` | 13.3ms | ~300 |
-| 3 | `hw.residents.species` | 14.8ms | ~600+ |
-| kitchen sink | all fields + all resolvers | 25.5ms | ~500+ |
+The cache changes repeat reads from "execute the resolver graph again" to "read serialized bytes by key":
 
-### 2. Fan-out is the killer
+| Cost Driver | Direct Viaduct | Cache Hit |
+|-------------|----------------|-----------|
+| Resolver invocations | Hundreds to thousands per request | 0 |
+| Transient JVM allocation | Resolver objects, collections, serialization buffers | Near zero in Viaduct |
+| Query depth impact | Increases latency and GC pressure | Mostly irrelevant |
+| Fan-out impact | Can dominate latency and throughput | Mostly payload-size bound |
+| JVM old-gen pressure | Visible under load | Avoided for cached reads |
 
-The `500 × depth1` query — 500 characters each resolving homeworld + species — hits **184ms mean**. That's a realistic "listing search results page" pattern: fetch N items, each with 2-3 related entities.
+This does not make cache misses free. It changes the steady-state read path when requests repeat, which is exactly where listing pages, search results, detail pages, and common persisted queries spend most of their volume.
 
-At 5.4 ops/s, a single Viaduct pod can only handle ~5 of these per second before saturating.
+## Why NVMe Fits Better Than RAM-Only Cache
 
-### 3. GC tail is visible in flat queries
+The queries worth caching are the nested and fan-out queries, and those produce a large key space. A 50KB average response across 40M active query/entity combinations is roughly 2TB of response data. That is not a good fit for an in-process LRU or a memory-only cache.
 
-The flat `name`-only query has a P50 of 2.68ms but P99 of 5.55ms — a **2.1x blowup** from GC pauses alone. The query does almost no work; the tail is pure GC.
+An NVMe-backed cache can hold the long tail on one node with about 1ms reads. Persistence also changes warming behavior: deploys and process restarts do not erase the working set, so warming is cumulative instead of starting over after each rollout.
 
-### 4. Memory footprint is predictable
+For stable, read-heavy data:
 
-~290 bytes per in-memory entity. 50K characters = 14.7 MB. This is the stored data only — the transient allocation per request (resolver objects, intermediate lists, serialization buffers) is what drives GC pressure.
+- Pull-through fills entries on first miss.
+- Query-history replay can warm a new region or first deploy.
+- Tiered warming can prioritize the top query shapes and entities before broad traffic.
+- Mutation-aware invalidation can purge only entries affected by changed types or entities.
 
-## What a Cache Layer Changes
+The last point is the correctness boundary. Long-lived entries are safe only when writes invalidate the affected responses.
 
-A query-result cache keyed by SHA-256 request body hash transforms the cost model. **These are now measured values**, not projections:
+## Rollout Shape
 
-| Metric | Without Cache | With Cache (hit) | Measured Speedup |
-|--------|---------------|-------------------|-----------------|
-| Nested query (depth 1, 100 chars) | 22ms | 923us | **24x** |
-| Fan-out query (500 chars, depth 1) | 28ms | 1.1ms | **24x** |
-| Depth-3 nested (hw.residents.species) | 11ms | 985us | **11x** |
-| GC pressure per request | ~130 KB transient | ~0 (serialized bytes from cache) | — |
-| Resolver invocations | 300-1500 per request | 0 (cache hit) | — |
-| Old-gen GC collections / minute | ~60+ under load | Near zero | — |
+Because the cache layer is a transparent proxy, cutover can be gradual:
 
-The cache doesn't just improve latency — it **eliminates the resolver object graph entirely** for cached queries. No resolver instantiation, no intermediate collections, no batch lookups, no serialization from object tree → JSON. The response is already serialized bytes.
+1. Run in shadow mode and mirror live reads to warm the cache.
+2. Watch hit rate and correctness before serving responses.
+3. Shift read traffic gradually through the cache.
+4. Keep Viaduct as the miss path and mutation handler.
 
-### Cache-Specific Features That Map to These Findings
+This avoids a user-visible cold start. Once warm, the NVMe working set survives cache-layer deploys and restarts.
 
-1. **Partial query splitting**: The "kitchen sink" query (25ms) mixes hot data (names, species) with cold data (timestamps). A cache that splits the query can serve the hot fragment from cache and only proxy the cold fragment upstream — reducing resolver load by 80%+ even on "partial misses."
-
-2. **Mutation-based invalidation**: When `createCharacter` lands, only queries touching the `Character` type need purging. A type→query index makes this O(types affected), not O(cache entries).
-
-3. **Fan-out query deduplication**: 500 characters with 4 distinct homeworld IDs means the homeworld resolver runs 4 unique lookups, not 500. A cache-aware layer can deduplicate at the entity level, not just the query level.
-
-## Why NVMe Cache — Not Memory Cache — Fits This Problem
-
-### The key space is large because the expensive queries are nested
-
-The queries that need caching are the nested ones (22-184ms). But nested queries have the largest key space: every unique combination of entity IDs in the resolver chain produces a different response. A listing detail page query that resolves host + reviews + photos + amenities has a key space proportional to the number of active listings — at Airbnb scale, tens of millions of unique cache entries.
-
-Memory-only caches (Redis, in-process LRU) can't hold this. A 50 KB average response × 40M entries = ~2 TB. That's the key space that actually hurts, and it doesn't fit in RAM.
-
-An NVMe-backed cache holds billions of keys on a single node at sub-millisecond read latency. The entire hot working set fits on one drive. **The queries that need caching the most are the ones with key spaces too large for memory-only caches.**
-
-### NVMe cache is persistent — warming is cumulative
-
-Unlike memory caches, NVMe-backed storage survives process restarts, deploys, and node reboots. Cache entries don't vanish on a rolling deploy. This changes the warming model fundamentally:
-
-- **No TTL-based expiration needed.** For datasets that are mostly stable (listings, user profiles, catalog data), cached responses remain valid until the underlying data changes. A listing that hasn't been edited in 6 months still has a warm cache entry from 6 months ago.
-- **Warming is monotonic.** Every cache miss that pulls through from upstream adds an entry that persists indefinitely. The cache only gets warmer over time.
-- **Deploy ≠ cold start.** Memory caches lose everything on restart. NVMe caches retain the full working set across deploys, scaling events, and maintenance windows.
-
-### Warming strategy for stable datasets
-
-Most entity data in a system like this is read-heavy and write-infrequent. Listings, species, planets, character profiles — they change rarely relative to how often they're read. For this class of data:
-
-1. **Pull-through on first miss.** Every query miss proxies to Viaduct, caches the response on the return path. Within hours of deployment, the popular query × entity combinations are warm.
-2. **Query history replay on cold start.** Log query hashes + variables as they flow through the gateway. On a true cold start (first deploy, new region), replay recent query history against Viaduct to pre-populate. 100 parallel workers × 45 ops/s = 4,500 queries/second — 40M entries warm in ~2.5 hours.
-3. **Tiered warming.** Don't replay everything. The top 30 query shapes × top 100K entities covers ~80% of expected traffic. Warm that first (~11 minutes), open to live traffic with pull-through for the rest.
-4. **Mutation-aware invalidation.** When data does change, the gateway sees the mutation, identifies affected cache entries via a type→query index, and purges only those entries. The next read re-warms that specific entry. No bulk expiration, no cache stampede.
-
-The net effect: for a dataset where 95%+ of entities change less than once per day, the cache converges to near-100% hit rate within 24-48 hours and stays there — because nothing expires it.
-
-### Zero-downtime cutover
-
-Because the cache layer sits in front of Viaduct as a transparent proxy, adoption doesn't require a flag day:
-
-1. **Shadow mode.** Deploy the cache layer alongside Viaduct, mirror live traffic through it without serving responses. Every request warms the cache. Viaduct continues serving directly.
-2. **Monitor hit rate.** When the cache reports 90%+ hit rate (typically hours for popular queries, 1-2 days for the long tail), it's ready.
-3. **Gradual traffic shift.** Balance a percentage of reads through the cache layer — 1%, 10%, 50% — while monitoring latency and correctness. Viaduct remains the fallback at every step.
-4. **Full cutover.** Route all reads through the cache. Viaduct handles only cache misses and mutations.
-
-No cold-start penalty for users. No downtime. The cache is proven warm before it serves a single production request. And because the NVMe storage is persistent, subsequent deploys of the cache layer itself don't lose the warm state — the working set survives restarts.
-
-## Measured Cache Results (Aerospike NVMe, 50K entities)
-
-The cache layer described above has been built and benchmarked. [hev/mesh](https://github.com/hev/mesh) implements a pull-through GraphQL response cache in `layer-gateway`: SHA-256 hash of the request body as cache key, Aerospike as the NVMe-backed store, transparent proxy to Viaduct on miss.
-
-### Setup
-
-- **Viaduct**: Star Wars demo, 50,005 characters (5 default + 50K synthetic via `SEED_CHARACTERS=50000`), JDK 21, Docker
-- **Cache layer**: `layer-gateway` (Rust/Axum), Aerospike Enterprise, Docker
-- **Benchmark**: 20 measured iterations per query pattern (cache hit), single cache miss to populate
-
-### Results
-
-```
----------------------------------------------------------------------------------------------------------
-GRAPHQL CACHE BENCHMARK (50K dataset, Aerospike NVMe cache)
----------------------------------------------------------------------------------------------------------
-Query                                        Direct (Viaduct)    Cache Miss    Cache Hit    Speedup
----------------------------------------------------------------------------------------------------------
-flat: 100 chars, name                                  6.3ms        14.9ms        932us         6x
-flat: 100 chars, all scalars                           6.7ms        14.5ms        989us         6x
-depth-1: 100 + homeworld                              22.1ms        21.1ms        1.0ms        21x
-depth-1: 100 + homeworld + species                    14.7ms         1.0ms        923us        16x
-depth-2: 100 + species.homeworld                      10.6ms        18.3ms        979us        10x
-depth-2: 100 + homeworld.residents(5)                 12.0ms        19.4ms        1.0ms        11x
-depth-3: 100 + hw.residents.species                   11.2ms        19.3ms        985us        11x
-fanout: 500 + homeworld + species                     28.3ms        34.0ms        1.1ms        24x
-kitchen sink: 50 + all resolvers                       6.4ms        14.8ms        1.0ms         5x
----------------------------------------------------------------------------------------------------------
-```
-
-### Key Observations
-
-1. **Cache hits are sub-millisecond regardless of query complexity.** Flat lookups and depth-3 fan-out queries both return in ~1ms. Query depth is irrelevant when serving from cache.
-
-2. **Fan-out queries show the largest absolute gain.** The 500-character depth-1 query drops from 28.3ms to 1.1ms — **24x speedup**. Under the 128MB heap constraint from the JVM benchmarks above (where this same query hits 184ms), the projected speedup is **~170x**.
-
-3. **Cache miss overhead is ~8-15ms** (proxy hop + Aerospike write). This is a one-time cost per unique query; all subsequent reads are sub-millisecond.
-
-4. **The cache eliminates GC pressure entirely for cached queries.** Zero resolver invocations, zero transient object allocation, zero serialization — the response is already serialized bytes read from Aerospike. Under sustained load, this means the JVM GC overhead drops from 8.1% to near zero for the cached query fraction.
-
-5. **Response payload size doesn't affect cache hit latency.** The fan-out query returns ~45KB of JSON but hits in 1.1ms — Aerospike's blob read is size-indifferent at these scales.
-
-### Reproducing the Cache Benchmark
+## Reproducing The Cache Benchmark
 
 ```bash
 # 1. Start Viaduct with 50K dataset
@@ -215,14 +161,13 @@ docker compose --profile graphql-cache up -d
 ./scripts/bench-graphql-cache.sh
 ```
 
-## Reproducing (JVM-Only Benchmarks)
+## Reproducing The JVM-Only Benchmark
 
 ```bash
-# Clone and run locally (128MB heap constraint is in build.gradle.kts)
 cd demoapps/starwars
 export JAVA_HOME=/path/to/jdk21
 
-# From viaduct root:
+# From the Viaduct root:
 ./gradlew --include-build demoapps/starwars :starwars:test --tests '*ReadWriteBenchmarkTest*'
 
 # Docker constrained runs (512MB / 256MB / 128MB containers):
