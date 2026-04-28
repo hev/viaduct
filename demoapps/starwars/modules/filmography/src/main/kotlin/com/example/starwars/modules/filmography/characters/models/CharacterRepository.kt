@@ -76,6 +76,14 @@ class CharacterRepository {
         )
     )
 
+    init {
+        val seedCount = System.getenv("SEED_CHARACTERS")?.toIntOrNull() ?: 0
+        if (seedCount > 0) {
+            bulkSeed(seedCount)
+            println("Seeded $seedCount synthetic characters (total: ${characters.size})")
+        }
+    }
+
     /**
      *  Retrieves all characters in the repository.
      *
@@ -141,6 +149,37 @@ class CharacterRepository {
         val newCharacter = character.copy(id = "${charactersIdSequence.andIncrement}")
         characters.add(newCharacter)
         return newCharacter
+    }
+
+    /**
+     * Bulk-inserts synthetic characters for benchmarking.
+     *
+     * @param count The number of synthetic characters to create.
+     * @return The total number of characters after insertion.
+     */
+    fun bulkSeed(count: Int): Int {
+        val homeworldIds = listOf("1", "2", "3", "4", "5", "6")
+        val speciesIds = listOf("1", "2")
+        val eyeColors = listOf("blue", "brown", "green", "hazel", "amber", "red", "yellow")
+        val hairColors = listOf("blond", "brown", "black", "red", "auburn", "white", "none")
+
+        for (i in 1..count) {
+            add(
+                Character(
+                    id = "",
+                    name = "Synth-$i",
+                    birthYear = "${i % 100}BBY",
+                    eyeColor = eyeColors[i % eyeColors.size],
+                    gender = if (i % 2 == 0) "male" else "female",
+                    hairColor = hairColors[i % hairColors.size],
+                    height = 150 + (i % 50),
+                    mass = (60 + (i % 40)).toFloat(),
+                    homeworldId = homeworldIds[i % homeworldIds.size],
+                    speciesId = speciesIds[i % speciesIds.size]
+                )
+            )
+        }
+        return characters.size
     }
 
     /**
