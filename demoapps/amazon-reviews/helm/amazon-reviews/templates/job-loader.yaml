@@ -1,0 +1,39 @@
+{{- if .Values.loader.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "amazon-reviews.fullname" . }}-loader
+  labels:
+    {{- include "amazon-reviews.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "amazon-reviews.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: loader
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: loader
+          image: "{{- if .Values.image.registry }}{{ .Values.image.registry }}/{{ end }}{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["java", "-cp", "/app/loader.jar", "com.example.amazonreviews.loader.DatasetLoaderKt"]
+          env:
+            - name: HEVMESH_BASE_URL
+              value: {{ .Values.hevmesh.baseUrl | quote }}
+            - name: DATASET_SUBSET
+              value: {{ .Values.loader.dataset | quote }}
+            - name: PARALLELISM
+              value: {{ .Values.loader.parallelism | quote }}
+          resources:
+            {{- toYaml .Values.loader.resources | nindent 12 }}
+{{- end }}

@@ -128,6 +128,18 @@ For stable, read-heavy data:
 
 The last point is the correctness boundary. Long-lived entries are safe only when writes invalidate the affected responses.
 
+### Cache Invalidation: Current Status
+
+Neither the demo apps nor the layer-gateway implement cache invalidation today. Mutations bypass the cache and always hit Viaduct directly, but cached read responses can go stale after a mutation lands. Several invalidation strategies are apparent:
+
+1. **Schema-static invalidation.** The GraphQL schema statically declares which types a mutation can affect (via its return type and reachable types). On any mutation, the cache layer can invalidate all entries whose query text references those types. Over-invalidates, but correct and requires no Viaduct engine changes.
+
+2. **Response-derived invalidation.** The mutation response contains the affected entity IDs (e.g., `Review:42`, `Product:7`). The layer-gateway already sees the response on its way back through the proxy — it can extract IDs and purge matching cache entries. More precise than schema-static; still requires no engine changes.
+
+3. **Engine-emitted invalidation metadata.** A new SPI (e.g., `MutationObserver`) on the Viaduct instrumentation interface could emit the set of types and entity IDs resolved during mutation execution. This gives the cache layer exact invalidation signals without parsing response JSON.
+
+All three approaches benefit from a **reverse index** in the cache layer mapping `(type, entity_id) → Set<cache_key>`, built at cache-write time by extracting entity IDs from miss responses. This makes invalidation O(affected entities) rather than O(cache size).
+
 ## Rollout Shape
 
 Because the cache layer is a transparent proxy, cutover can be gradual:

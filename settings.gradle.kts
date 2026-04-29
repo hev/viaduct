@@ -58,6 +58,7 @@ includeBuild("demoapps/jetty-starter")
 includeBuild("demoapps/ktor-starter")
 includeBuild("demoapps/micronaut-starter")
 includeBuild("demoapps/starwars")
+includeBuild("demoapps/amazon-reviews")
 
 // misc
 include(":docs")

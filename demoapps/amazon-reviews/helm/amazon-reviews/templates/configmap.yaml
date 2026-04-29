@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "amazon-reviews.fullname" . }}-config
+  labels:
+    {{- include "amazon-reviews.labels" . | nindent 4 }}
+data:
+  application.properties: |
+    micronaut.application.name=amazon-reviews
+    micronaut.server.port=8080
+    micronaut.server.context-path=/
+    hevmesh.base-url={{ .Values.hevmesh.baseUrl }}

@@ -1,0 +1,39 @@
+type Product implements Node @scope(to: ["default"]) @resolver(isBatching: true) {
+  id: ID!
+  title: String
+  price: Float
+  averageRating: Float
+  ratingCount: Int
+  description: String
+  imageUrls: [String]
+  created: String
+
+  category: Category @resolver(isBatching: true)
+  reviews(first: Int, after: String): ReviewsConnection @resolver
+  boughtTogether: [Product] @resolver(isBatching: true)
+  topReviews(limit: Int): [Review] @resolver
+  ratingSummary: RatingSummary @resolver(isBatching: true)
+}
+
+type RatingSummary @scope(to: ["default"]) {
+  average: Float
+  count: Int
+  distribution: [Int]
+}
+
+extend type Query @scope(to: ["default"]) {
+  product(id: ID! @idOf(type: "Product")): Product @resolver
+  allProducts(first: Int, after: String): ProductsConnection @resolver
+  searchProducts(query: String!, limit: Int): [Product] @resolver
+  productsByCategory(categoryId: ID! @idOf(type: "Category"), first: Int, after: String): ProductsConnection @resolver
+}
+
+type ProductsConnection @connection @scope(to: ["default"]) {
+  edges: [ProductEdge]
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+type ProductEdge @edge @scope(to: ["default"]) {
+  node: Product
+  cursor: String!
+}

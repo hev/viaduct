@@ -1,0 +1,107 @@
+networks:
+  amazon-reviews:
+    driver: bridge
+
+services:
+  # ---------------------------------------------------------------------------
+  # Infrastructure (mirrored from mesh docker-compose)
+  # ---------------------------------------------------------------------------
+
+  aerospike:
+    image: aerospike/aerospike-server-enterprise:latest
+    volumes:
+      - ../../../mesh/aerospike/aerospike.conf:/etc/aerospike/aerospike.conf
+    healthcheck:
+      test: ["CMD", "asinfo", "-v", "status"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks:
+      - amazon-reviews
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    networks:
+      - amazon-reviews
+
+  minio-init:
+    image: minio/mc
+    depends_on:
+      - minio
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 minioadmin minioadmin; do
+          echo 'Waiting for MinIO...'
+          sleep 2
+        done
+        mc mb --ignore-existing local/hevmesh-wal
+        echo 'Bucket hevmesh-wal created'
+    networks:
+      - amazon-reviews
+
+  hevmesh:
+    build:
+      context: ../../../mesh
+      dockerfile: Dockerfile
+    depends_on:
+      aerospike:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AEROSPIKE_HOST: aerospike:3000
+      S3_ENDPOINT: http://minio:9000
+      S3_BUCKET: hevmesh-wal
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080'"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    networks:
+      - amazon-reviews
+
+  # ---------------------------------------------------------------------------
+  # Application
+  # ---------------------------------------------------------------------------
+
+  amazon-reviews:
+    build:
+      context: ../..
+      dockerfile: demoapps/amazon-reviews/Dockerfile
+    ports:
+      - "8090:8080"
+    depends_on:
+      hevmesh:
+        condition: service_healthy
+    environment:
+      JAVA_OPTS: "-Xmx2g -Xms1g -XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+      HEVMESH_BASE_URL: http://hevmesh:8080
+    networks:
+      - amazon-reviews
+
+  loader:
+    build:
+      context: ../..
+      dockerfile: demoapps/amazon-reviews/Dockerfile
+    entrypoint: ["sh", "-c", "exec java $JAVA_OPTS -jar /app/loader.jar"]
+    restart: "no"
+    depends_on:
+      hevmesh:
+        condition: service_healthy
+    environment:
+      JAVA_OPTS: "-Xmx2g -Xms1g -XX:+UseG1GC"
+      HEVMESH_BASE_URL: http://hevmesh:8080
+      DATASET_SUBSET: All_Beauty
+      PARALLELISM: 2
+    networks:
+      - amazon-reviews

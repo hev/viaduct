@@ -1,0 +1,27 @@
+type Review implements Node @scope(to: ["default"]) @resolver(isBatching: true) {
+  id: ID!
+  rating: Float
+  title: String
+  text: String
+  helpful: Int
+  verified: Boolean
+  created: String
+
+  author: User @resolver(isBatching: true)
+  product: Product @resolver(isBatching: true)
+}
+
+extend type Query @scope(to: ["default"]) {
+  review(id: ID! @idOf(type: "Review")): Review @resolver
+  recentReviews(limit: Int): [Review] @resolver
+}
+
+type ReviewsConnection @connection @scope(to: ["default"]) {
+  edges: [ReviewEdge]
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+type ReviewEdge @edge @scope(to: ["default"]) {
+  node: Review
+  cursor: String!
+}

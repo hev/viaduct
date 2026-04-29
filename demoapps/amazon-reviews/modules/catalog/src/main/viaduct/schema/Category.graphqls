@@ -1,0 +1,13 @@
+type Category implements Node @scope(to: ["default"]) @resolver(isBatching: true) {
+  id: ID!
+  name: String
+  parent: Category @resolver
+  children: [Category] @resolver
+  products(first: Int, after: String): ProductsConnection @resolver
+  productCount: Int @resolver(isBatching: true)
+}
+
+extend type Query @scope(to: ["default"]) {
+  allCategories: [Category] @resolver
+  category(id: ID! @idOf(type: "Category")): Category @resolver
+}

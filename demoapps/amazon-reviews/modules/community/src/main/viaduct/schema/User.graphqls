@@ -1,0 +1,12 @@
+type User implements Node @scope(to: ["default"]) @resolver(isBatching: true) {
+  id: ID!
+  displayName: String
+
+  reviews(first: Int, after: String): ReviewsConnection @resolver
+  reviewCount: Int @resolver(isBatching: true)
+  averageRating: Float @resolver(isBatching: true)
+}
+
+extend type Query @scope(to: ["default"]) {
+  user(id: ID! @idOf(type: "User")): User @resolver
+}

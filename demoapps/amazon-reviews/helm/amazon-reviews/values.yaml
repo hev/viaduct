@@ -1,0 +1,67 @@
+image:
+  registry: ""
+  repository: amazon-reviews
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+resources:
+  requests:
+    cpu: "2"
+    memory: "8Gi"
+  limits:
+    cpu: "4"
+    memory: "16Gi"
+
+jvm:
+  heapMax: "12g"
+  heapMin: "8g"
+  extraOpts: "-XX:+UseG1GC -XX:MaxGCPauseMillis=200"
+
+hevmesh:
+  baseUrl: "http://hevmesh:8080"
+
+nodeSelector:
+  workload: viaduct
+
+service:
+  type: ClusterIP
+  port: 8080
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+serviceAccount:
+  create: true
+  name: ""
+
+loader:
+  enabled: true
+  dataset: "full"
+  parallelism: 8
+  resources:
+    requests:
+      cpu: "4"
+      memory: "16Gi"
+    limits:
+      cpu: "8"
+      memory: "32Gi"
+
+k6:
+  enabled: false
+  duration: "4h"
+  vus: 50
+  rampUp: "5m"
+  image: grafana/k6:latest
+  prometheusUrl: ""
+  resources:
+    requests:
+      cpu: "1"
+      memory: "2Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"

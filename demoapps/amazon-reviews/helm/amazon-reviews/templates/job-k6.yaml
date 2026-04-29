@@ -1,0 +1,52 @@
+{{- if .Values.k6.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "amazon-reviews.fullname" . }}-k6-script
+  labels:
+    {{- include "amazon-reviews.labels" . | nindent 4 }}
+data:
+  stress-test.js: |
+{{ .Files.Get "k6/stress-test.js" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "amazon-reviews.fullname" . }}-k6
+  labels:
+    {{- include "amazon-reviews.labels" . | nindent 4 }}
+    app.kubernetes.io/component: k6
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        {{- include "amazon-reviews.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: k6
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: {{ .Values.k6.image }}
+          command: ["k6", "run", "/scripts/stress-test.js"]
+          env:
+            - name: K6_VUS
+              value: {{ .Values.k6.vus | quote }}
+            - name: K6_DURATION
+              value: {{ .Values.k6.duration | quote }}
+            - name: TARGET_URL
+              value: "http://{{ include "amazon-reviews.fullname" . }}:{{ .Values.service.port }}/graphql"
+            {{- if .Values.k6.prometheusUrl }}
+            - name: K6_PROMETHEUS_RW_SERVER_URL
+              value: {{ .Values.k6.prometheusUrl | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: k6-script
+              mountPath: /scripts
+          resources:
+            {{- toYaml .Values.k6.resources | nindent 12 }}
+      volumes:
+        - name: k6-script
+          configMap:
+            name: {{ include "amazon-reviews.fullname" . }}-k6-script
+{{- end }}
