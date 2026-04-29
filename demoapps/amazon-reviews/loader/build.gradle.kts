@@ -5,7 +5,7 @@ plugins {
 }
 
 dependencies {
-    implementation(project(":common"))
+    implementation("com.example.hevmesh:hevmesh-client")
     implementation("io.ktor:ktor-client-core:3.1.3")
     implementation("io.ktor:ktor-client-cio:3.1.3")
     implementation("io.ktor:ktor-client-content-negotiation:3.1.3")

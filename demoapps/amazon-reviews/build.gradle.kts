@@ -51,7 +51,7 @@ dependencies {
     kapt(libs.micronaut.inject.kotlin)
 
     runtimeOnly(libs.logback.classic)
-    implementation(project(":common"))
+    implementation("com.example.hevmesh:hevmesh-client")
     runtimeOnly(project(":modules:catalog"))
     runtimeOnly(project(":modules:community"))
 

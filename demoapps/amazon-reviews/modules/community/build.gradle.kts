@@ -12,7 +12,7 @@ viaductModule {
 dependencies {
     api(libs.viaduct.api)
     implementation(libs.viaduct.runtime)
-    implementation(project(":common"))
+    implementation("com.example.hevmesh:hevmesh-client")
     implementation(libs.jackson.module.kotlin)
     implementation(libs.micronaut.inject)
     kapt(libs.micronaut.inject.java)

@@ -52,6 +52,9 @@ includeBuild("core")
 // so auto-substitution handles them without any explicit rules.
 includeBuild("gradle-plugins")
 
+// shared libs
+includeBuild("libs/hevmesh-client")
+
 // demo apps
 includeBuild("demoapps/cli-starter")
 includeBuild("demoapps/jetty-starter")

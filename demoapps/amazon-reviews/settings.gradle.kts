@@ -38,5 +38,12 @@ rootProject.name = "viaduct-amazon-reviews"
 
 include(":modules:catalog")
 include(":modules:community")
-include(":common")
 include(":loader")
+
+// hevmesh-client is now a standalone lib at libs/hevmesh-client
+if (gradle.parent != null) {
+    // Composite build: already included by root settings
+} else {
+    // Standalone build: include directly
+    includeBuild("../../libs/hevmesh-client")
+}
